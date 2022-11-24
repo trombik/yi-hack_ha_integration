@@ -95,6 +95,20 @@ Add the linw below to your configuration file:
 media_source:
 ```
 
+## Supported Entities
+
+The following entities are implemented (depending on the device model).
+
+### Switches
+
+| Name | Description |
+|------|-------------|
+| `motion_detection` | enable or disable motion detection |
+| `human_detection` | enable or disable human detection (currently not working, see [yi-hack-Allwinner-v2#333](https://github.com/roleoroleo/yi-hack-Allwinner-v2/issues/333)) |
+| `baby_crying` | enable or disable baby crying detection |
+| `sound_detection` | enable or disable sound detection |
+| `privacy` | enable or disable privacy mode by disabling camera |
+
 ## Donation
 If you like this project, you can buy me a beer :) 
 [![paypal](https://www.paypalobjects.com/en_US/i/btn/btn_donateCC_LG.gif)](https://www.paypal.com/cgi-bin/webscr?cmd=_donations&business=JBYXDMR24FW7U&currency_code=EUR&source=url)
