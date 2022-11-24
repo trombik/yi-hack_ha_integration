@@ -22,7 +22,8 @@ from homeassistant.helpers.aiohttp_client import async_aiohttp_proxy_stream
 from homeassistant.helpers.device_registry import CONNECTION_NETWORK_MAC
 
 from .common import (get_privacy, set_power_off_in_progress,
-                     set_power_on_in_progress, set_privacy)
+                     set_power_on_in_progress, set_privacy,
+                     call_api)
 from .const import (ALLWINNER, ALLWINNERV2, CONF_BOOST_SPEAKER, CONF_HACK_NAME,
                     CONF_MQTT_PREFIX, CONF_PTZ,
                     CONF_TOPIC_MOTION_DETECTION_IMAGE, DEFAULT_BRAND, DOMAIN,
@@ -128,11 +129,16 @@ class YiHackCamera(Camera):
         self._hack_name = config.data[CONF_HACK_NAME]
         self._ptz = config.data[CONF_PTZ]
         self._state = None
+        self._config = dict([
+            (CONF_HOST, self._host),
+            (CONF_PORT, self._port),
+            (CONF_USERNAME, self._user),
+            (CONF_PASSWORD, self._password),
+        ])
 
         self._http_base_url = "http://" + self._host
         if self._port != 80:
             self._http_base_url += ":" + str(self._port)
-        self._still_image_url = self._http_base_url + "/cgi-bin/snapshot.sh?res=high&watermark=yes"
 
         try:
             self._boost_speaker = config.data[CONF_BOOST_SPEAKER]
@@ -146,41 +152,23 @@ class YiHackCamera(Camera):
 
     def update(self):
         """Return the state of the camera (privacy off = state on)."""
-        conf = dict([
-            (CONF_HOST, self._host),
-            (CONF_PORT, self._port),
-            (CONF_USERNAME, self._user),
-            (CONF_PASSWORD, self._password),
-        ])
-        self._state = not get_privacy(self.hass, self._device_name, conf)
+        self._state = not get_privacy(self.hass, self._device_name, self._config)
 
     def turn_off(self):
         """Set privacy true (set camera off)."""
-        conf = dict([
-            (CONF_HOST, self._host),
-            (CONF_PORT, self._port),
-            (CONF_USERNAME, self._user),
-            (CONF_PASSWORD, self._password),
-        ])
         if not get_privacy(self.hass, self._device_name):
             _LOGGER.debug("Turn off camera %s", self._name)
             set_power_off_in_progress(self.hass, self._device_name)
-            set_privacy(self.hass, self._device_name, True, conf)
+            set_privacy(self.hass, self._device_name, True, self._config)
             self._state = False
             self.schedule_update_ha_state(force_refresh=True)
 
     def turn_on(self):
         """Set privacy false (set camera on)."""
-        conf = dict([
-            (CONF_HOST, self._host),
-            (CONF_PORT, self._port),
-            (CONF_USERNAME, self._user),
-            (CONF_PASSWORD, self._password),
-        ])
         if get_privacy(self.hass, self._device_name):
             _LOGGER.debug("Turn on Camera %s", self._name)
             set_power_on_in_progress(self.hass, self._device_name)
-            set_privacy(self.hass, self._device_name, False, conf)
+            set_privacy(self.hass, self._device_name, False, self._config)
             self._state = True
             self.schedule_update_ha_state(force_refresh=True)
 
@@ -188,13 +176,8 @@ class YiHackCamera(Camera):
         """Return the stream source."""
         def fetch_link():
             """Get URL from camera available links."""
-            auth = None
-            if self._user or self._password:
-                auth = HTTPBasicAuth(self._user, self._password)
-
             try:
-                response = requests.get(self._http_base_url + "/cgi-bin/links.sh",
-                                        timeout=HTTP_TIMEOUT, auth=auth)
+                response = call_api(self._config, "links.sh", None)
                 if response.status_code < 300:
                     links: dict = response.json()
                     stream_source: str = links.get(LINK_HIGH_RES_STREAM) or links.get(LINK_LOW_RES_STREAM)
@@ -224,27 +207,19 @@ class YiHackCamera(Camera):
         """Camera component will resize it."""
         image = None
 
-        if self._still_image_url:
-            auth = None
-            if self._user or self._password:
-                auth = HTTPBasicAuth(self._user, self._password)
+        def fetch():
+            """Read image from a URL."""
+            response = call_api(self._config, "snapshot.sh", "res=high&watermark=yes")
+            if response.status_code < 300:
+                return response.content
+            if response is None or response is False:
+                _LOGGER.error(
+                    "Fetch snapshot image failed from %s, falling back to FFmpeg",
+                    self._name
+                )
+            return None
 
-            def fetch():
-                """Read image from a URL."""
-                try:
-                    response = requests.get(self._still_image_url, timeout=HTTP_TIMEOUT, auth=auth)
-                    if response.status_code < 300:
-                        return response.content
-                except requests.exceptions.RequestException as error:
-                    _LOGGER.error(
-                        "Fetch snapshot image failed from %s, falling back to FFmpeg; %s",
-                        self._name,
-                        error,
-                    )
-
-                return None
-
-            image = await self.hass.async_add_executor_job(fetch)
+        image = await self.hass.async_add_executor_job(fetch)
 
         if image is None:
             stream_source = await self.stream_source()
@@ -286,12 +261,8 @@ class YiHackCamera(Camera):
             await stream.close()
 
     def _perform_ptz(self, movement, travel_time_str):
-        auth = None
-        if self._user or self._password:
-            auth = HTTPBasicAuth(self._user, self._password)
-
         try:
-            response = requests.get("http://" + self._host + ":" + str(self._port) + "/cgi-bin/ptz.sh?dir=" + movement + "&time=" + travel_time_str, timeout=HTTP_TIMEOUT, auth=auth)
+            response = call_api(self._config, "ptz.sh", "dir=" + movement + "&time=" + travel_time_str)
             if response.status_code >= 300:
                 _LOGGER.error("Failed to send ptz command to device %s", self._host)
         except requests.exceptions.RequestException as error:
@@ -313,12 +284,8 @@ class YiHackCamera(Camera):
         await self.hass.async_add_executor_job(self._perform_ptz, movement, travel_time_str)
 
     def _perform_move_to_preset(self, preset_id):
-        auth = None
-        if self._user or self._password:
-            auth = HTTPBasicAuth(self._user, self._password)
-
         try:
-            response = requests.get(f"http://{self._host}:{self._port}/cgi-bin/preset.sh?action=go_preset&num={preset_id}", timeout=HTTP_TIMEOUT, auth=auth)
+            response = call_api(self._config, "preset.sh", "action=go_preset&num={preset_id}")
             if response.status_code >= 300:
                 _LOGGER.error(f"Failed to send go to preset command to device {self._host}")
         except requests.exceptions.RequestException as error:
@@ -434,16 +401,16 @@ class YiHackMqttCamera(Camera):
         self._last_image = None
         self._mqtt_subscription = None
         self._state = None
-
-    def update(self):
-        """Return the state of the camera (privacy off = state on)."""
-        conf = dict([
+        self._config = dict([
             (CONF_HOST, self._host),
             (CONF_PORT, self._port),
             (CONF_USERNAME, self._user),
             (CONF_PASSWORD, self._password),
         ])
-        self._state = not get_privacy(self.hass, self._device_name, conf)
+
+    def update(self):
+        """Return the state of the camera (privacy off = state on)."""
+        self._state = not get_privacy(self.hass, self._device_name, self._config)
 
     async def async_added_to_hass(self):
         """Subscribe to MQTT events."""
